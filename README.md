@@ -1,2 +1,2 @@
-# awaf-policy-validator
-Advanced Web Application Firewall Policy Validation Tool
+# f5-waf-tester
+Web Application Firewall Security Testing Tool

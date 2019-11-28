@@ -5,10 +5,10 @@ RUN mkdir -p /app
 WORKDIR /app
 
 # Bundle app source
-COPY awaf_policy_validator/ /app/
-COPY awaf-policy-validator.py requirements.txt /app/
+COPY f5_waf_tester/ /app/
+COPY f5-waf-tester.py requirements.txt /app/
 
 # Install packages
 RUN pip install -r requirements.txt
 
-CMD [ "python", "awaf-policy-validator.py" ]
+ENTRYPOINT [ "python", "f5-waf-tester.py" ]

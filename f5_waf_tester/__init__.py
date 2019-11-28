@@ -12,11 +12,11 @@ from multiprocessing.pool import ThreadPool
 from requests.compat import urlparse, urljoin, quote_plus
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
-from awaf_policy_validator.bigip import ASM
+from f5_waf_tester.bigip import ASM
 
-__app_name__ = "awaf_policy_validator"
 __version__ = "0.1.1b"
 __folder__ = path.abspath(path.dirname(__file__))
+__app_name__ = path.basename(__folder__)
 
 CONFIG_TEMPLATE = {
     "big-ip": {
@@ -43,7 +43,7 @@ CONFIG_TEMPLATE = {
 }
 
 
-class AWAFPolicyValidator(object):
+class F5WAFTester(object):
     def __init__(self, configuration_path=path.join(__folder__, "config", "config.json"),
                  tests_path=path.join(__folder__, "config", "tests.json")):
         self.logger = logging.getLogger(__name__)
@@ -496,8 +496,8 @@ def main(args=None):
     logging.getLogger("requests.packages.urllib3.connectionpool").disabled = True
 
     if sys_args['init']:
-        return AWAFPolicyValidator.init(configuration_path=sys_args['config'])
+        return F5WAFTester.init(configuration_path=sys_args['config'])
 
-    sys.exit(AWAFPolicyValidator(
+    sys.exit(F5WAFTester(
         configuration_path=sys_args['config'], tests_path=sys_args['tests']
     ).start(report_path=sys_args['report']))

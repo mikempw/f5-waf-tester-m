@@ -14,15 +14,15 @@ def get_readme():
 
 
 def get_version():
-    with open(path.join(__folder__, 'awaf_policy_validator', '__init__.py')) as lib_file:
+    with open(path.join(__folder__, 'f5_waf_tester', '__init__.py')) as lib_file:
         r = re.search(r'__version__\s*=\s*(?P<q>["\']+)(?P<ver>[^(?P=q)]+)(?P=q)', lib_file.read())
         return r.group('ver')
 
 
 setup(
-    name='awaf-policy-validator',
+    name='f5-waf-tester',
     version=get_version(),
-    description='Advanced Web Application Firewall Policy Validation Tool.',
+    description='Web Application Firewall Security Testing Tool',
     long_description=get_readme(),
     author='RealGame (Tomer Zait)',
     author_email='realgam3@gmail.com',
@@ -30,10 +30,10 @@ setup(
     package_data={
         '': ['config/tests.json']
     },
-    py_modules=['awaf_policy_validator'],
+    py_modules=['f5_waf_tester'],
     entry_points={
         'console_scripts': [
-            'awaf-policy-validator = awaf_policy_validator:main',
+            'f5-waf-tester = f5_waf_tester:main',
         ]
     },
     install_requires=[
@@ -41,7 +41,7 @@ setup(
     ],
     license="Apache-2.0",
     platforms='any',
-    url='https://github.com/f5devcentral/awaf-policy-validator',
+    url='https://github.com/f5devcentral/f5-waf-tester',
     classifiers=[
         'License :: OSI Approved :: Apache Software License',
         'Development Status :: 4 - Beta',
