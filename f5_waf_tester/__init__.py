@@ -25,7 +25,7 @@ CONFIG_TEMPLATE = {
         "password": ""
     },
     "asm_policy_name": "",
-    "virtual_server_url": "",
+    "virtual_server_url": "",  # Now supports comma-separated URLs
     "blocking_regex": "<br>Your support ID is: (?P<id>\\d+)<br>",
     "threads": 25,
     "filters": {
@@ -69,6 +69,7 @@ class F5WAFTester(object):
     def generate_tests(self):
         include = self.config["filters"]["include"]
         exclude = self.config["filters"]["exclude"]
+        urls = [url.strip() for url in self.config["virtual_server_url"].split(',')]
 
         for test in self.tests:
             if (include["id"] and test["id"] not in include["id"]) or \
@@ -84,12 +85,13 @@ class F5WAFTester(object):
             vectors = test.pop("vectors")
             for vector in vectors:
                 expected_result = vector.pop("expected_result")
-                yield {
-                    "url": self.config["virtual_server_url"],
-                    "test": test,
-                    "vector": vector,
-                    "expected_result": expected_result
-                }
+                for url in urls:
+                    yield {
+                        "url": url,
+                        "test": test,
+                        "vector": vector,
+                        "expected_result": expected_result
+                    }
 
     def test_vector(self, url, test, vector, expected_result):
         res = ""
@@ -152,13 +154,15 @@ class F5WAFTester(object):
             "vector": vector,
             "error": error,
             "expected_result": expected_result,
-            "result": re_res.group('id').decode(res_encoding) if re_res else None
+            "result": re_res.group('id').decode(res_encoding) if re_res else None,
+            "url": url
         }
 
-        self.logger.info("Test {id}/{applies_to} {result}".format(
-            id=test['id'], applies_to=vector["applies_to"],
+        self.logger.info("Test {id}/{applies_to} on {url} {result}".format(
+            id=test['id'],
+            applies_to=vector["applies_to"],
+            url=url,
             result="pass" if re_res else "failed"
-
         ))
         return result
 
@@ -174,27 +178,33 @@ class F5WAFTester(object):
         for res in self.pool.imap_unordered(lambda t: self.test_vector(**t), self.generate_tests()):
             test_id = res["test"]["id"]
             test_applies_to = res["vector"]["applies_to"]
+            url = res["url"]
 
-            report["details"][test_id]["CVE"] = res["test"]["CVE"]
-            report["details"][test_id]["name"] = res["test"]["name"]
-            report["details"][test_id]["system"] = res["test"]["system"]
-            report["details"][test_id]["attack_type"] = res["test"]["attack_type"]
+            if test_id not in report["details"]:
+                report["details"][test_id] = {
+                    "CVE": res["test"]["CVE"],
+                    "name": res["test"]["name"],
+                    "system": res["test"]["system"],
+                    "attack_type": res["test"]["attack_type"],
+                    "results": defaultdict(lambda: defaultdict(dict))
+                }
 
-            if not report["details"][test_id].get("results"):
-                report["details"][test_id]["results"] = defaultdict(dict)
-
-            report["details"][test_id]["results"][test_applies_to]["reason"] = ""
-            report["details"][test_id]["results"][test_applies_to]["support_id"] = ""
-            report["details"][test_id]["results"][test_applies_to]["expected_result"] = res["expected_result"]
+            url_key = url.replace(".", "_").replace(":", "_")
+            report["details"][test_id]["results"][test_applies_to][url_key] = {
+                "reason": "",
+                "support_id": "",
+                "expected_result": res["expected_result"],
+                "pass": False
+            }
 
             if not res["result"]:
-                report["details"][test_id]["results"][test_applies_to]["pass"] = False
                 report["summary"]["fail"] += 1
                 continue
 
-            report["details"][test_id]["results"][test_applies_to]["support_id"] = res["result"]
-            report["details"][test_id]["results"][test_applies_to]["pass"] = True
+            report["details"][test_id]["results"][test_applies_to][url_key]["support_id"] = res["result"]
+            report["details"][test_id]["results"][test_applies_to][url_key]["pass"] = True
             report["summary"]["pass"] += 1
+
             if not self.policy:
                 event = self.asm.events(res["result"], select=["requestPolicyReference"])
                 self.policy = self.asm.policy(path.basename(urlparse(event["requestPolicyReference"]["link"]).path))
@@ -223,21 +233,18 @@ class F5WAFTester(object):
             }
         }
 
-        # All Tests Failed And No Policy Found
         if not self.policy:
             for typ in reasons:
                 for applies_to in reasons[typ]:
                     reasons[typ][applies_to] = "Unknown, Maybe ASM Policy is not in blocking mode"
             return reasons
 
-        # Policy In Transparent Mode
         if self.policy.enforcement_mode != "blocking":
             for typ in reasons:
                 for applies_to in reasons[typ]:
                     reasons[typ][applies_to] = "ASM Policy is not in blocking mode"
             return reasons
 
-        # Check Header * WildCard
         header_wildcard = self.policy.get(
             "headers",
             filter="name eq '*'",
@@ -246,7 +253,6 @@ class F5WAFTester(object):
         if not header_wildcard["checkSignatures"]:
             reasons["signature"]["header"] = "Header * Does not check signatures"
 
-        # Check Parameter * WildCard
         parameter_wildcard = self.policy.get(
             "parameters",
             filter="name eq '*'",
@@ -258,7 +264,6 @@ class F5WAFTester(object):
         elif not parameter_wildcard["attackSignaturesCheck"]:
             reasons["signature"]["parameter"] = "Parameter * Does not check signatures"
 
-        # Check If Blocking Evasions
         if not self.policy.get(
                 "blocking-settings/violations",
                 filter="description eq 'Evasion technique detected'",
@@ -316,73 +321,59 @@ class F5WAFTester(object):
 
         report_details = report["details"]
         for test_id, details in report_details.items():
-            for applies_to, result in details["results"].items():
-                expected_result = result.get("expected_result")
-                if result["pass"]:
-                    continue
-
-                typ = expected_result["type"]
-                if global_reasons[typ][applies_to]:
-                    result["reason"] = global_reasons[typ][applies_to]
-                    continue
-
-                if not self.policy:
-                    continue
-
-                if typ == "signature":
-                    if expected_result["value"] not in signatures:
-                        reason = "Attack Signatures are not up to date"
-                        result["reason"] = reason
+            for applies_to, result_dict in details["results"].items():
+                for url_key, result in result_dict.items():
+                    expected_result = result.get("expected_result")
+                    if result["pass"]:
                         continue
 
-                    if not signatures[expected_result["value"]]["exists"]:
-                        reason = "Attack Signature is not in the ASM Policy"
-                        result["reason"] = reason
+                    typ = expected_result["type"]
+                    if global_reasons[typ][applies_to]:
+                        result["reason"] = global_reasons[typ][applies_to]
                         continue
 
-                    if not signatures[expected_result["value"]]["enabled"]:
-                        reason = "Attack Signature disabled"
-                        result["reason"] = reason
+                    if not self.policy:
                         continue
 
-                    if not signatures[expected_result["value"]]["block"]:
-                        reason = "Attack Signature is not blocking"
-                        result["reason"] = reason
-                        continue
+                    if typ == "signature":
+                        if expected_result["value"] not in signatures:
+                            result["reason"] = "Attack Signatures are not up to date"
+                            continue
+                        if not signatures[expected_result["value"]]["exists"]:
+                            result["reason"] = "Attack Signature is not in the ASM Policy"
+                            continue
+                        if not signatures[expected_result["value"]]["enabled"]:
+                            result["reason"] = "Attack Signature disabled"
+                            continue
+                        if not signatures[expected_result["value"]]["block"]:
+                            result["reason"] = "Attack Signature is not blocking"
+                            continue
+                        if signatures[expected_result["value"]]["staging"]:
+                            result["reason"] = "Attack Signature is in staging"
+                            continue
 
-                    if signatures[expected_result["value"]]["staging"]:
-                        reason = "Attack Signature is in staging"
-                        result["reason"] = reason
-                        continue
+                    if typ == "evasion":
+                        if not evasions.get(expected_result["value"]):
+                            result["reason"] = "Evasion disabled"
+                            continue
 
-                if typ == "evasion":
-                    if not evasions.get(expected_result["value"]):
-                        reason = "Evasion disabled"
-                        result["reason"] = reason
-                        continue
+                    if typ == "violation":
+                        if not violations.get(expected_result["value"]):
+                            result["reason"] = "Violation disabled"
+                            continue
 
-                if typ == "violation":
-                    if not violations.get(expected_result["value"]):
-                        reason = "Violation disabled"
-                        result["reason"] = reason
-                        continue
+                    url_wildcard = self.policy.get(
+                        "urls",
+                        filter="name eq '*'",
+                        select=["attackSignaturesCheck", "signatureOverrides", "performStaging", "type", "name"]
+                    )["items"][0]
+                    if url_wildcard["performStaging"]:
+                        result["reason"] = "URL * is in staging"
+                    elif not url_wildcard["attackSignaturesCheck"]:
+                        result["reason"] = "URL * Does not check signatures"
 
-                # Check URL * WildCard
-                url_wildcard = self.policy.get(
-                    "urls",
-                    filter="name eq '*'",
-                    select=["attackSignaturesCheck", "signatureOverrides", "performStaging", "type", "name"]
-                )["items"][0]
-                if url_wildcard["performStaging"]:
-                    reason = "URL * is in staging"
-                    result["reason"] = reason
-                elif not url_wildcard["attackSignaturesCheck"]:
-                    reason = "URL * Does not check signatures"
-                    result["reason"] = reason
-
-                if not result["reason"]:
-                    reason = "Unknown fail reason"
-                    result["reason"] = reason
+                    if not result["reason"]:
+                        result["reason"] = "Unknown fail reason"
 
         return report
 
@@ -407,7 +398,7 @@ class F5WAFTester(object):
         config["big-ip"]["password"] = prompt("[BIG-IP] Password", default=config["big-ip"]["password"], password=True)
 
         config["asm_policy_name"] = prompt("ASM Policy Name", default=config["asm_policy_name"])
-        config["virtual_server_url"] = prompt("Virtual Server URL", default=config["virtual_server_url"])
+        config["virtual_server_url"] = prompt("Virtual Server URLs (Separated by ',')", default=config["virtual_server_url"])
         config["blocking_regex"] = prompt("Blocking Regular Expression Pattern", default=config["blocking_regex"])
         config["threads"] = int(prompt("Number OF Threads", default=config["threads"]) or 1)
 
@@ -475,29 +466,34 @@ def main(args=None):
     parser.add_argument("-v", "--version", action="version", version="%(prog)s {ver}".format(ver=__version__))
 
     parser.add_argument("-i", "--init",
-                        help="Initialize Configuration.",
-                        action='store_true')
+                       help="Initialize Configuration.",
+                       action='store_true')
 
     parser.add_argument("-c", "--config",
-                        help="Configuration File Path.",
-                        default=path.join(__folder__, "config", "config.json"))
+                       help="Configuration File Path.",
+                       default=path.join(__folder__, "config", "config.json"))
     parser.add_argument("-t", "--tests",
-                        help="Tests File Path.",
-                        default=path.join(__folder__, "config", "tests.json"))
+                       help="Tests File Path.",
+                       default=path.join(__folder__, "config", "tests.json"))
     parser.add_argument("-r", "--report",
-                        help="Report File Save Path.",
-                        default="report.json")
+                       help="Report File Save Path.",
+                       default="report.json")
 
     sys_args = vars(parser.parse_args(args=args))
 
     logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s",
-                        datefmt="%d-%m-%y %H:%M:%S")
+                       format="%(asctime)s %(levelname)s %(message)s",
+                       datefmt="%d-%m-%y %H:%M:%S")
     logging.getLogger("requests.packages.urllib3.connectionpool").disabled = True
 
     if sys_args['init']:
         return F5WAFTester.init(configuration_path=sys_args['config'])
 
     sys.exit(F5WAFTester(
-        configuration_path=sys_args['config'], tests_path=sys_args['tests']
+        configuration_path=sys_args['config'],
+        tests_path=sys_args['tests']
     ).start(report_path=sys_args['report']))
+
+
+if __name__ == "__main__":
+    main()
